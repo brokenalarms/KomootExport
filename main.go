@@ -55,18 +55,17 @@ func NewKomootCollector() KomootCollector {
 
 func (kc *KomootCollector) Login(creds map[string]string) error {
 	kc.userId = creds["user_id"]
-	err := requests.URL("https://account.komoot.com/v1/signin").
-		Client(kc.client).
-		Method(http.MethodPost).
-		BodyForm(url.Values{
-			"email":    []string{creds["email"]},
-			"password": []string{creds["password"]},
-			"reason":   []string{"null"},
-		}).
-		Fetch(context.Background())
+	// Parse cookies
+	cookiesUrl, err := url.Parse("https://account.komoot.com/actions/transfer?type=signin")
 	if err != nil {
-		return err
+		panic(err)
 	}
+	cookies, err := http.ParseCookie(creds["cookie"])
+	if err != nil {
+		panic(err)
+	}
+	kc.client.Jar.SetCookies(cookiesUrl, cookies)
+	// Do request for other cookies
 	return requests.URL("https://account.komoot.com/actions/transfer?type=signin").
 		Client(kc.client).
 		Fetch(context.Background())
