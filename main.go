@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/carlmjohnson/requests"
 	"gopkg.in/yaml.v3"
@@ -23,22 +26,25 @@ func main() {
 		log.Fatalf("Login returned %v", err)
 		return
 	}
-	ids, err := collector.FetchRecordedTourIDs()
+	tours, err := collector.FetchRecordedTours()
 	if err != nil {
 		log.Fatalf("Fetching tour ids returned %v", err)
 		return
 	}
-	log.Printf("Found %d tours\n", len(ids))
-	for _, id := range ids {
-		gpxPath := fmt.Sprintf("%s/%s.gpx", toursDir, id)
-		if _, err := os.Stat(gpxPath); err == nil {
-			log.Printf("%s already saved\n", gpxPath)
+	log.Printf("Found %d tours\n", len(tours))
+	for _, tour := range tours {
+		tourDir := filepath.Join(toursDir, tour.id)
+		if _, err := os.Stat(tourDir); err == nil {
+			log.Printf("%s already saved\n", tour.id)
 			continue
 		}
-		log.Printf("Downloading GPX for tour %s\n", id)
-		err := collector.DownloadTourGPX(id, gpxPath)
-		if err != nil {
-			log.Fatalf("Downloading tour %s failed: %v", id, err)
+		log.Printf("Downloading tour %s\n", tour.id)
+		if err := os.MkdirAll(tourDir, os.ModePerm); err != nil {
+			log.Fatalf("Failed to create download directory for tour %s: %v", tour, err)
+			return
+		}
+		if err := collector.DownloadTour(tour, tourDir); err != nil {
+			log.Fatalf("Downloading tour %s failed: %v", tour.id, err)
 			return
 		}
 	}
@@ -85,8 +91,15 @@ func readCredentials() map[string]string {
 	return creds
 }
 
-func (kc *KomootCollector) FetchRecordedTourIDs() ([]string, error) {
-	var data map[string]interface{}
+type tour struct {
+	id             string
+	gpx            string
+	vectorMapImage string
+	coverImages    []string
+}
+
+func (kc *KomootCollector) FetchRecordedTours() ([]*tour, error) {
+	var data map[string]any
 	if err := requests.URL(fmt.Sprintf("https://www.komoot.com/api/v007/users/%s/tours/", kc.userId)).
 		Param("type", "tour_recorded").
 		Param("sort_field", "date").
@@ -99,18 +112,57 @@ func (kc *KomootCollector) FetchRecordedTourIDs() ([]string, error) {
 		Fetch(context.Background()); err != nil {
 		return nil, err
 	}
-	items := data["_embedded"].(map[string]interface{})["tours"].([]interface{})
-	ids := []string{}
+	items := data["_embedded"].(map[string]any)["tours"].([]any)
+	tours := []*tour{}
 	for _, item := range items {
-		id := item.(map[string]interface{})["id"].(float64)
-		ids = append(ids, fmt.Sprintf("%.0f", id))
+		tour := &tour{}
+		itemMap := item.(map[string]any)
+		tour.id = fmt.Sprintf("%.0f", itemMap["id"].(float64))
+		tour.gpx = fmt.Sprintf("https://www.komoot.com/tour/%s/download", tour.id)
+		// Vector image
+		if vectorMapImageMap, ok := itemMap["vector_map_image"].(map[string]any); ok {
+			tour.vectorMapImage = vectorMapImageMap["src"].(string)
+		}
+		// Cover images
+		var coverImageData map[string]any
+		err := requests.URL(fmt.Sprintf("https://www.komoot.com/api/v007/tours/%s/cover_images/", tour.id)).
+			ParamInt("page", 0).
+			ParamInt("limit", 10000).
+			Client(kc.client).
+			ToJSON(&coverImageData).
+			Fetch(context.Background())
+		if err == nil {
+			coverImageEmbedded := coverImageData["_embedded"]
+			if coverImageEmbedded != nil {
+				coverImageItems := coverImageEmbedded.(map[string]any)["items"].([]any)
+				for _, coverImageItem := range coverImageItems {
+					src := coverImageItem.(map[string]any)["src"].(string)
+					tour.coverImages = append(tour.coverImages, strings.Split(src, "?")[0])
+				}
+			}
+		}
+		tours = append(tours, tour)
 	}
-	return ids, nil
+	return tours, nil
 }
 
-func (kc *KomootCollector) DownloadTourGPX(id, gpxPath string) error {
-	return requests.URL(fmt.Sprintf("https://www.komoot.com/tour/%s/download", id)).
+func (kc *KomootCollector) DownloadTour(t *tour, downloadPath string) error {
+	var errs []error
+	errs = append(errs, requests.URL(t.gpx).
 		Client(kc.client).
-		ToFile(gpxPath).
-		Fetch(context.Background())
+		ToFile(filepath.Join(downloadPath, "tour.gpx")).
+		Fetch(context.Background()))
+	if t.vectorMapImage != "" {
+		errs = append(errs, requests.URL(t.vectorMapImage).
+			Client(kc.client).
+			ToFile(filepath.Join(downloadPath, "map.jpg")).
+			Fetch(context.Background()))
+	}
+	for i, img := range t.coverImages {
+		errs = append(errs, requests.URL(img).
+			Client(kc.client).
+			ToFile(filepath.Join(downloadPath, fmt.Sprintf("%d.jpg", i))).
+			Fetch(context.Background()))
+	}
+	return errors.Join(errs...)
 }
