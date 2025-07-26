@@ -9,45 +9,73 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/carlmjohnson/requests"
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
+var (
+	toursDir          string
+	credsPath         string
+	tourType          string
+	includeTitleInDir bool
+)
+
 const (
-	toursDir  = "tours"
-	credsPath = "creds.yaml"
+	defaultToursDir  = "tours"
+	defaultCredsPath = "creds.yaml"
+	defaultTourType  = "tour_recorded"
 )
 
 func main() {
-	collector := NewKomootCollector()
-	if err := collector.Login(readCredentials()); err != nil {
-		log.Fatalf("Login returned %v", err)
-		return
+	var rootCmd = &cobra.Command{
+		Use:   "komoot-downloader",
+		Short: "Download Komoot tours",
+		Run: func(cmd *cobra.Command, args []string) {
+			collector := NewKomootCollector()
+			if err := collector.Login(readCredentials()); err != nil {
+				log.Fatalf("Login returned %v", err)
+				return
+			}
+			tours, err := collector.FetchTours(tourType)
+			if err != nil {
+				log.Fatalf("Fetching tour ids returned %v", err)
+				return
+			}
+			log.Printf("Found %d tours\n", len(tours))
+			for _, tour := range tours {
+				dirName := tour.id
+				if includeTitleInDir && tour.title != "" {
+					titleSanitized := sanitizeFilename(tour.title)
+					dirName = fmt.Sprintf("%s %s", tour.id, titleSanitized)
+				}
+				tourDir := filepath.Join(toursDir, dirName)
+				if _, err := os.Stat(tourDir); err == nil {
+					log.Printf("%s already saved\n", tour.id)
+					continue
+				}
+				log.Printf("Downloading tour %s\n", tour.id)
+				if err := os.MkdirAll(tourDir, os.ModePerm); err != nil {
+					log.Fatalf("Failed to create download directory for tour %s: %v", tour.id, err)
+					return
+				}
+				if err := collector.DownloadTour(tour, tourDir); err != nil {
+					log.Fatalf("Downloading tour %s failed: %v", tour.id, err)
+					return
+				}
+				time.Sleep(2 * time.Second)
+			}
+		},
 	}
-	tours, err := collector.FetchRecordedTours()
-	if err != nil {
-		log.Fatalf("Fetching tour ids returned %v", err)
-		return
-	}
-	log.Printf("Found %d tours\n", len(tours))
-	for _, tour := range tours {
-		tourDir := filepath.Join(toursDir, tour.id)
-		if _, err := os.Stat(tourDir); err == nil {
-			log.Printf("%s already saved\n", tour.id)
-			continue
-		}
-		log.Printf("Downloading tour %s\n", tour.id)
-		if err := os.MkdirAll(tourDir, os.ModePerm); err != nil {
-			log.Fatalf("Failed to create download directory for tour %s: %v", tour, err)
-			return
-		}
-		if err := collector.DownloadTour(tour, tourDir); err != nil {
-			log.Fatalf("Downloading tour %s failed: %v", tour.id, err)
-			return
-		}
-	}
+	rootCmd.Flags().StringVar(&toursDir, "toursDir", defaultToursDir, "Directory for tour downloads")
+	rootCmd.Flags().StringVar(&credsPath, "creds", defaultCredsPath, "Path to credentials file")
+	rootCmd.Flags().StringVar(&tourType, "tourType", defaultTourType, "Type of tours: tour_recorded or tour_planned")
+	rootCmd.Flags().BoolVar(&includeTitleInDir, "includeTitleInDir", false, "Include tour title in directory name")
+	cobra.CheckErr(rootCmd.Execute())
 }
 
 type KomootCollector struct {
@@ -96,12 +124,13 @@ type tour struct {
 	gpx            string
 	vectorMapImage string
 	coverImages    []string
+	title          string
 }
 
-func (kc *KomootCollector) FetchRecordedTours() ([]*tour, error) {
+func (kc *KomootCollector) FetchTours(tourType string) ([]*tour, error) {
 	var data map[string]any
 	if err := requests.URL(fmt.Sprintf("https://www.komoot.com/api/v007/users/%s/tours/", kc.userId)).
-		Param("type", "tour_recorded").
+		Param("type", tourType).
 		Param("sort_field", "date").
 		Param("sort_direction", "desc").
 		Param("status", "private").
@@ -118,6 +147,7 @@ func (kc *KomootCollector) FetchRecordedTours() ([]*tour, error) {
 		tour := &tour{}
 		itemMap := item.(map[string]any)
 		tour.id = fmt.Sprintf("%.0f", itemMap["id"].(float64))
+		tour.title = itemMap["name"].(string)
 		tour.gpx = fmt.Sprintf("https://www.komoot.com/tour/%s/download", tour.id)
 		// Vector image
 		if vectorMapImageMap, ok := itemMap["vector_map_image"].(map[string]any); ok {
@@ -165,4 +195,11 @@ func (kc *KomootCollector) DownloadTour(t *tour, downloadPath string) error {
 			Fetch(context.Background()))
 	}
 	return errors.Join(errs...)
+}
+
+func sanitizeFilename(name string) string {
+	reg := regexp.MustCompile(`[^a-zA-Z0-9\-_\s]`)
+	name = reg.ReplaceAllString(name, "_")
+	name = strings.TrimSpace(name)
+	return name
 }
