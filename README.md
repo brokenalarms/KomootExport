@@ -7,12 +7,13 @@ Create a new `creds.yaml` file, insert your credentials and run the downloader.
 You can run the downloader with custom parameters:
 
 ```
-go run . --toursDir <download-directory> --creds <path-to-creds.yaml> --tourType <tour_recorded|tour_planned>
+go run . --toursDir <download-directory> --creds <path-to-creds.yaml> --tourType <tour_recorded|tour_planned> --includeTitleInDir
 ```
 
 - `--toursDir`: Directory where tours will be downloaded (default: `tours`)
 - `--creds`: Path to your credentials file (default: `creds.yaml`)
 - `--tourType`: Type of tours to download (`tour_recorded` or `tour_planned`, default: `tour_recorded`)
+- `--includeTitleInDir`: If set, the tour title will be included in the download directory name (default: not set)
 
 ## Features
 
