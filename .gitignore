@@ -1,2 +1,4 @@
 creds.yaml
 /tours*
+.claude/
+.DS_Store
